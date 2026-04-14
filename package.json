@@ -1,0 +1,34 @@
+{
+  "name": "spy-acting-bot",
+  "version": "1.0.0",
+  "description": "Bot de Telegram para jogo de dedução social e improvisação presencial",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "tsx src/db/migrate.ts",
+    "db:studio": "drizzle-kit studio",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "grammy": "^1.21.0",
+    "@grammyjs/conversations": "^1.2.0",
+    "@grammyjs/menu": "^1.2.0",
+    "better-sqlite3": "^11.0.0",
+    "drizzle-orm": "^0.30.0",
+    "dotenv": "^16.4.0",
+    "nanoid": "^5.0.0",
+    "winston": "^3.11.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "drizzle-kit": "^0.21.0",
+    "vitest": "^1.4.0",
+    "@types/better-sqlite3": "^7.6.0",
+    "tsx": "^4.7.0"
+  }
+}

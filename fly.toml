@@ -1,0 +1,13 @@
+app = "spy-acting-bot"
+primary_region = "gru"
+
+[build]
+
+[mounts]
+  source = "spy_acting_data"
+  destination = "/app/data"
+
+[vm]
+  memory = "256mb"
+  cpu_kind = "shared"
+  cpus = 1
