@@ -10,7 +10,16 @@
 import { describe, it, expect } from 'vitest';
 import { calculateGroups } from '../../src/engine/groups';
 import { createGame, joinGame, leaveGame, validateGameStart } from '../../src/engine/lobby';
-import { checkRoundClose } from '../../src/engine/verdict';
+import { checkRoundClose, submitSpyGuess, __resetSpyGraceTimers } from '../../src/engine/verdict';
+import { beforeEach, afterEach } from 'vitest';
+
+beforeEach(() => {
+  __resetSpyGraceTimers();
+});
+
+afterEach(() => {
+  __resetSpyGraceTimers();
+});
 import { createTestGame, createTestPlayer, createFullRoundScenario } from '../helpers/factories';
 import { createMockApi } from '../helpers/mock-api';
 import { db } from '../../src/db/connection';
@@ -107,7 +116,9 @@ describe.each([3, 4, 5, 6, 7, 8, 9, 10, 11, 12])(
         }
       }
 
-      // Spy continua unpaired (isolado)
+      // Spy continua unpaired (isolado) mas com chute registrado (pula graça)
+      await submitSpyGuess(round.id, spyPlayer.id, 'Hospital');
+
       const api = createMockApi();
       await checkRoundClose(round.id, api);
 

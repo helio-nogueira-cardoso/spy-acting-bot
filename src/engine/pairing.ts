@@ -210,6 +210,12 @@ export async function undoPairing(
     }
   }
 
+  // Se havia uma janela de graça pendente para o espião, cancela — o
+  // desfazer de um par re-abre a rodada e as condições de fechamento
+  // precisam ser re-avaliadas do zero.
+  const { cancelSpyGraceIfActive } = await import('./verdict');
+  cancelSpyGraceIfActive(roundId);
+
   await touchRoundGame(roundId);
   logger.info(`Par desfeito por jogador ${playerId} na rodada ${roundId}. Afetados: [${groupMembers}]`);
   return { success: true, affectedPlayerIds: groupMembers };

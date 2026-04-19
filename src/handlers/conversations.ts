@@ -7,6 +7,37 @@ import { db } from '../db/connection';
 import { rounds, playerRoundState, players, games, manualConfigs, roundRoles } from '../db/schema';
 import { getPlayersInGame } from '../utils/validators';
 
+/**
+ * Detecta se o usuário é o configurador de um jogo manual aguardando o prompt
+ * de "digite o local" (primeiro texto após o pedido de config). Como o pedido
+ * em engine/round.ts usa api.sendMessage (sem passar pelo middleware de
+ * sessão), o session.currentStep do configurador fica undefined — esta função
+ * reconstrói o step a partir do estado do jogo no DB.
+ */
+export async function findPendingManualConfigGame(userId: number) {
+  const candidates = await db.query.games.findMany({
+    where: and(eq(games.creatorId, userId), eq(games.mode, 'manual')),
+  });
+
+  for (const game of candidates) {
+    // Só consideramos jogos em andamento, mas fora de uma rodada ativa
+    if (game.status !== 'playing' && game.status !== 'round_ended') continue;
+
+    // A próxima rodada ainda não foi criada no DB?
+    const nextRoundNumber = game.currentRound + 1;
+    if (nextRoundNumber > game.totalRounds) continue;
+
+    const existingRound = await db.query.rounds.findFirst({
+      where: and(eq(rounds.gameId, game.id), eq(rounds.roundNumber, nextRoundNumber)),
+    });
+    if (existingRound) continue;
+
+    return { game, nextRoundNumber };
+  }
+
+  return null;
+}
+
 export function registerTextHandlers(bot: Bot<BotContext>): void {
   // Capturar texto no DM para chute do espião e modo manual
   bot.on('message:text', async (ctx, next) => {
@@ -15,9 +46,18 @@ export function registerTextHandlers(bot: Bot<BotContext>): void {
       return next();
     }
 
-    const step = ctx.session.currentStep;
+    let step = ctx.session.currentStep;
+
+    // Sem step explícito: checar se é o configurador de modo manual aguardando
+    // o local da próxima rodada (session não é acessível a partir do engine)
     if (!step) {
-      return next();
+      const pending = await findPendingManualConfigGame(ctx.from.id);
+      if (pending) {
+        step = `manual_location:${pending.game.id}:${pending.nextRoundNumber}`;
+        ctx.session.currentStep = step;
+      } else {
+        return next();
+      }
     }
 
     try {
@@ -31,11 +71,18 @@ export function registerTextHandlers(bot: Bot<BotContext>): void {
           return;
         }
 
-        // Buscar o player
+        // Buscar o round e o player
         const round = await db.query.rounds.findFirst({ where: eq(rounds.id, roundId) });
         if (!round) {
           ctx.session.currentStep = undefined;
           await ctx.reply('❌ Rodada não encontrada.');
+          return;
+        }
+
+        // Só faz sentido chutar enquanto a rodada está ativa
+        if (round.status !== 'active') {
+          ctx.session.currentStep = undefined;
+          await ctx.reply(messages.spyRoundNotActive);
           return;
         }
 
@@ -48,11 +95,28 @@ export function registerTextHandlers(bot: Bot<BotContext>): void {
           return;
         }
 
+        // Confirma que o remetente é o espião da rodada
+        const role = await db.query.roundRoles.findFirst({
+          where: and(eq(roundRoles.roundId, roundId), eq(roundRoles.playerId, player.id)),
+        });
+        if (role?.role !== 'spy') {
+          ctx.session.currentStep = undefined;
+          await ctx.reply(messages.spyNoGuessError);
+          return;
+        }
+
         const { submitSpyGuess, checkRoundClose } = await import('../engine/verdict');
         await submitSpyGuess(roundId, player.id, guess);
 
         ctx.session.currentStep = undefined;
-        await ctx.reply(messages.verdictConfirmed, { parse_mode: 'Markdown' });
+        await ctx.reply(messages.spyGuessRecorded(guess), {
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🕵️ Alterar Chute', callback_data: `spy_guess_btn:${roundId}` }],
+            ],
+          },
+        });
 
         await checkRoundClose(roundId, ctx.api);
         return;

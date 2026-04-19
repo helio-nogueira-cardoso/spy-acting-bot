@@ -799,6 +799,11 @@ export function registerCallbacks(bot: Bot<BotContext>): void {
       if (role.role === 'spy') {
         await ctx.api.sendMessage(ctx.from.id, messages.spyDm(round.roundNumber, game.totalRounds, round.spyHint, role.characterName), {
           parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🕵️ Chutar Local', callback_data: `spy_guess_btn:${roundId}` }],
+            ],
+          },
         });
       } else {
         // Encontrar parceiros
@@ -813,7 +818,7 @@ export function registerCallbacks(bot: Bot<BotContext>): void {
           partnerInfo = `Seu grupo (trio): Procure o ${partnerChars.join(' e o ')}`;
         }
 
-        await ctx.api.sendMessage(ctx.from.id, messages.agentDm(round.roundNumber, game.totalRounds, round.locationName, role.characterName, round.spyHint, partnerInfo), {
+        await ctx.api.sendMessage(ctx.from.id, messages.agentDm(round.roundNumber, game.totalRounds, round.locationName, role.characterName, partnerInfo), {
           parse_mode: 'Markdown',
         });
       }
@@ -898,20 +903,7 @@ export function registerCallbacks(bot: Bot<BotContext>): void {
         return;
       }
 
-      // Verificar se é espião — precisa chutar o local
-      const role = await db.query.roundRoles.findFirst({
-        where: and(eq(roundRoles.roundId, roundId), eq(roundRoles.playerId, player.id)),
-      });
-
-      if (role?.role === 'spy') {
-        await ctx.answerCallbackQuery();
-        // Salvar estado para capturar texto depois
-        ctx.session.currentStep = `spy_guess:${roundId}`;
-        await ctx.api.sendMessage(ctx.from.id, messages.spyGuessPrompt, { parse_mode: 'Markdown' });
-        return;
-      }
-
-      // Agente: confirmar veredito direto
+      // Veredito é igual para agentes e espião (chute é separado)
       await ctx.answerCallbackQuery({ text: '✅ Veredito confirmado!' });
 
       await db.update(playerRoundState)
@@ -926,6 +918,40 @@ export function registerCallbacks(bot: Bot<BotContext>): void {
     } catch (error) {
       logger.error(`Erro no verdict: ${error}`);
       await ctx.answerCallbackQuery({ text: 'Erro ao confirmar veredito.', show_alert: true });
+    }
+  });
+
+  // ─── Spy guess button (disponível a qualquer momento) ─────────
+  bot.callbackQuery(/^spy_guess_btn:(\d+)$/, async (ctx) => {
+    try {
+      const roundId = parseInt(ctx.match![1], 10);
+      const player = await getPlayerByUserAndRound(ctx.from.id, roundId);
+      if (!player) {
+        await ctx.answerCallbackQuery({ text: 'Você não está nesta rodada.', show_alert: true });
+        return;
+      }
+
+      const round = await getRoundInfo(roundId);
+      if (!round || round.status !== 'active') {
+        await ctx.answerCallbackQuery({ text: messages.spyRoundNotActive, show_alert: true });
+        return;
+      }
+
+      const role = await db.query.roundRoles.findFirst({
+        where: and(eq(roundRoles.roundId, roundId), eq(roundRoles.playerId, player.id)),
+      });
+
+      if (role?.role !== 'spy') {
+        await ctx.answerCallbackQuery({ text: messages.spyNoGuessError, show_alert: true });
+        return;
+      }
+
+      await ctx.answerCallbackQuery();
+      ctx.session.currentStep = `spy_guess:${roundId}`;
+      await ctx.api.sendMessage(ctx.from.id, messages.spyGuessPrompt, { parse_mode: 'Markdown' });
+    } catch (error) {
+      logger.error(`Erro no spy_guess_btn: ${error}`);
+      await ctx.answerCallbackQuery({ text: 'Erro ao iniciar chute.', show_alert: true });
     }
   });
 

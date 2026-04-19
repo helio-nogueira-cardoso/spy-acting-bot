@@ -6,7 +6,11 @@
  * - Rodada: pareamento/veredito em ordens diferentes
  * - Eventos: jogador sai no lobby, jogador tenta entrar durante rodada
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { __resetSpyGraceTimers, submitSpyGuess } from '../../src/engine/verdict';
+
+beforeEach(() => { __resetSpyGraceTimers(); });
+afterEach(() => { __resetSpyGraceTimers(); });
 import {
   simulateLobby,
   simulateRound,
@@ -354,6 +358,9 @@ describe.each([4, 6, 8])(
         // Ficou isolado — verdictActive será auto-marcado pelo checkRoundClose
       }
 
+      // Chute do espião com o local correto para evitar votação fair-play
+      await submitSpyGuess(round!.id, spyDbId, round!.locationName);
+
       await import('../../src/engine/verdict').then(m => m.checkRoundClose(round!.id, api));
 
       const closed = await db.query.rounds.findFirst({ where: eq(rounds.id, round!.id) });
@@ -385,7 +392,8 @@ describe.each([4, 6, 8])(
         await pairAndVerdict(round!.id, group);
       }
 
-      // Spy fica isolado (unpaired) — checkRoundClose deve fechar a rodada
+      // Spy fica isolado (unpaired) mas registra chute correto — rodada fecha
+      await submitSpyGuess(round!.id, spyDbId, round!.locationName);
       await import('../../src/engine/verdict').then(m => m.checkRoundClose(round!.id, api));
 
       const closed = await db.query.rounds.findFirst({ where: eq(rounds.id, round!.id) });

@@ -57,11 +57,21 @@ describe('mensagens dinâmicas', () => {
   });
 
   it('agentDm contém local, personagem e parceiro', () => {
-    const msg = messages.agentDm(1, 5, 'Hospital', 'Cirurgião', 'Pulso', 'Dupla: Enfermeira');
+    const msg = messages.agentDm(1, 5, 'Hospital', 'Cirurgião', 'Dupla: Enfermeira');
     expect(msg).toContain('Hospital');
     expect(msg).toContain('Cirurgião');
-    expect(msg).toContain('Pulso');
     expect(msg).toContain('Enfermeira');
+  });
+
+  it('agentDm NÃO vaza a dica do espião (Bug #1)', () => {
+    const msg = messages.agentDm(1, 5, 'Hospital', 'Cirurgião', 'Dupla: Enfermeira');
+    expect(msg).not.toContain('Dica do Espião');
+    expect(msg).not.toContain('💡');
+  });
+
+  it('agentDm não tem parâmetro dedicado a dica do espião (Bug #1)', () => {
+    // A assinatura tem 5 parâmetros — sem spyHint entre eles
+    expect(messages.agentDm.length).toBe(5);
   });
 
   it('spyDm contém dica e disfarce', () => {

@@ -5,7 +5,7 @@
 import { createGame, joinGame, leaveGame, validateGameStart, updateGameStatus, updatePlayerPhoto } from '../../src/engine/lobby';
 import { getPlayersInGame } from '../../src/utils/validators';
 import { createPairingRequest, acceptPairing } from '../../src/engine/pairing';
-import { checkRoundClose } from '../../src/engine/verdict';
+import { checkRoundClose, submitSpyGuess } from '../../src/engine/verdict';
 import { startNextRound, getPlayerRoundState, getRoundInfo } from '../../src/engine/round';
 import { db } from '../../src/db/connection';
 import { games, rounds, playerRoundState, roundRoles, players } from '../../src/db/schema';
@@ -162,11 +162,12 @@ export async function pairAndVerdict(roundId: number, groupPlayerIds: number[]) 
   }
 }
 
-/** Simula uma rodada completa: pareamento na ordem dada + vereditos */
+/** Simula uma rodada completa: pareamento na ordem dada + vereditos + chute do espião */
 export async function simulateRound(
   roundId: number,
   groupOrder: 'sequential' | 'reverse',
   api: any,
+  opts: { spyGuess?: string | null } = {},
 ): Promise<void> {
   const groups = await getCorrectGroups(roundId);
   const groupList = Array.from(groups.values());
@@ -174,6 +175,22 @@ export async function simulateRound(
 
   for (const group of ordered) {
     await pairAndVerdict(roundId, group);
+  }
+
+  // O espião chuta antes do close check (sem chute, a nova janela de graça
+  // mantém a rodada aberta por 60s esperando um chute final). Por padrão
+  // usamos o próprio nome do local da rodada — assim o chute é aprovado
+  // automaticamente e evitamos a votação fair-play (que espera 60s).
+  let spyGuess: string | null;
+  if (opts.spyGuess === undefined) {
+    const round = await db.query.rounds.findFirst({ where: eq(rounds.id, roundId) });
+    spyGuess = round?.locationName ?? 'Hospital';
+  } else {
+    spyGuess = opts.spyGuess;
+  }
+  if (spyGuess !== null) {
+    const spyPlayerId = await getSpyId(roundId);
+    await submitSpyGuess(roundId, spyPlayerId, spyGuess);
   }
 
   await checkRoundClose(roundId, api);

@@ -250,29 +250,41 @@ describe('jogador sai com pairing pendente', () => {
 // ═══════════════════════════════════════════════════════════════
 
 describe('spy isolado sem chute (spyGuess = null)', () => {
-  it('rodada fecha normalmente mesmo sem chute do spy', async () => {
-    const { round, players: ps, spyPlayer } = await createFullRoundScenario({ playerCount: 3, spyIndex: 0 });
+  it('rodada fecha após janela de graça mesmo sem chute do spy (Bug #2)', async () => {
+    vi.useFakeTimers();
+    try {
+      const { round, players: ps, spyPlayer } = await createFullRoundScenario({ playerCount: 3, spyIndex: 0 });
 
-    const agents = ps.filter(p => p.id !== spyPlayer.id);
-    const pairedWith = JSON.stringify(agents.map(a => a.id));
-    for (const agent of agents) {
-      await db.update(playerRoundState)
-        .set({ pairingStatus: 'paired', pairedWith, verdictActive: 1 })
-        .where(and(eq(playerRoundState.roundId, round.id), eq(playerRoundState.playerId, agent.id)));
+      const agents = ps.filter(p => p.id !== spyPlayer.id);
+      const pairedWith = JSON.stringify(agents.map(a => a.id));
+      for (const agent of agents) {
+        await db.update(playerRoundState)
+          .set({ pairingStatus: 'paired', pairedWith, verdictActive: 1 })
+          .where(and(eq(playerRoundState.roundId, round.id), eq(playerRoundState.playerId, agent.id)));
+      }
+
+      const api = createMockApi();
+      const { checkRoundClose, __resetSpyGraceTimers } = await import('../../src/engine/verdict');
+      __resetSpyGraceTimers();
+
+      await checkRoundClose(round.id, api);
+
+      // Antes de expirar a graça: rodada ainda ativa
+      let r = await db.query.rounds.findFirst({ where: eq(rounds.id, round.id) });
+      expect(r!.status).toBe('active');
+
+      // Avança além da janela de graça (60s)
+      await vi.advanceTimersByTimeAsync(61_000);
+
+      r = await db.query.rounds.findFirst({ where: eq(rounds.id, round.id) });
+      expect(r!.status).toBe('closed');
+      // spyGuess deve ser null
+      expect(r!.spyGuess).toBeNull();
+      // spyGuessApproved deve ser 0 (não acertou)
+      expect(r!.spyGuessApproved).toBe(0);
+    } finally {
+      vi.useRealTimers();
     }
-
-    // Spy isolado, spyGuess = null (nunca chutou)
-    const api = createMockApi();
-    const { checkRoundClose } = await import('../../src/engine/verdict');
-    await checkRoundClose(round.id, api);
-
-    const updatedRound = await db.query.rounds.findFirst({ where: eq(rounds.id, round.id) });
-    expect(updatedRound!.status).toBe('closed');
-
-    // spyGuess deve ser null
-    expect(updatedRound!.spyGuess).toBeNull();
-    // spyGuessApproved deve ser 0 (não acertou)
-    expect(updatedRound!.spyGuessApproved).toBe(0);
   });
 });
 

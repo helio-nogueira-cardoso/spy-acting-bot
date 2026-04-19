@@ -168,6 +168,7 @@ export async function startNextRound(gameId: string, api: Api): Promise<void> {
             parse_mode: 'Markdown',
             reply_markup: {
               inline_keyboard: [
+                [{ text: '🕵️ Chutar Local', callback_data: `spy_guess_btn:${round.id}` }],
                 [{ text: '🤝 Solicitar Par', callback_data: `pair_list:${round.id}` }],
                 [{ text: '📋 Ver Meu Papel', callback_data: `view_role:${round.id}` }],
                 [{ text: '📊 Ver Situação', callback_data: `view_status:${round.id}` }],
@@ -189,7 +190,7 @@ export async function startNextRound(gameId: string, api: Api): Promise<void> {
             }
           }
 
-          await api.sendMessage(player.userId, messages.agentDm(newRound, game.totalRounds, location.name, characterAssignments.get(player.id) || 'Agente', location.spy_hint, partnerInfo), {
+          await api.sendMessage(player.userId, messages.agentDm(newRound, game.totalRounds, location.name, characterAssignments.get(player.id) || 'Agente', partnerInfo), {
             parse_mode: 'Markdown',
             reply_markup: {
               inline_keyboard: [
@@ -306,6 +307,7 @@ export async function startManualRound(
             parse_mode: 'Markdown',
             reply_markup: {
               inline_keyboard: [
+                [{ text: '🕵️ Chutar Local', callback_data: `spy_guess_btn:${round.id}` }],
                 [{ text: '🤝 Solicitar Par', callback_data: `pair_list:${round.id}` }],
                 [{ text: '📋 Ver Meu Papel', callback_data: `view_role:${round.id}` }],
                 [{ text: '📊 Ver Situação', callback_data: `view_status:${round.id}` }],
@@ -330,7 +332,7 @@ export async function startManualRound(
             }
           }
 
-          await api.sendMessage(player.userId, messages.agentDm(newRound, game.totalRounds, locationName, characterAssignments.get(player.id) || 'Agente', spyHint, partnerInfo), {
+          await api.sendMessage(player.userId, messages.agentDm(newRound, game.totalRounds, locationName, characterAssignments.get(player.id) || 'Agente', partnerInfo), {
             parse_mode: 'Markdown',
             reply_markup: {
               inline_keyboard: [

@@ -10,6 +10,34 @@ import { cleanupGameData } from './cleanup';
 import { sqliteNow, touchGameActivity } from './lobby';
 import type { Api } from 'grammy';
 
+// Janela pós-vereditos para o espião chutar (ou alterar o chute)
+const SPY_GRACE_MS = 60_000;
+export const SPY_GRACE_SECONDS = SPY_GRACE_MS / 1000;
+
+// Timers de grace ativos, chaveados por roundId
+const spyGraceTimers = new Map<number, ReturnType<typeof setTimeout>>();
+
+function cancelSpyGrace(roundId: number): boolean {
+  const timer = spyGraceTimers.get(roundId);
+  if (timer) {
+    clearTimeout(timer);
+    spyGraceTimers.delete(roundId);
+    return true;
+  }
+  return false;
+}
+
+/** Cancela um grace pendente — usado quando o estado da rodada muda (ex: undo de par). */
+export function cancelSpyGraceIfActive(roundId: number): void {
+  cancelSpyGrace(roundId);
+}
+
+/** Testes: limpa timers pendentes entre cenários. */
+export function __resetSpyGraceTimers(): void {
+  for (const timer of spyGraceTimers.values()) clearTimeout(timer);
+  spyGraceTimers.clear();
+}
+
 export async function submitSpyGuess(roundId: number, playerId: number, guess: string): Promise<void> {
   const round = await db.query.rounds.findFirst({ where: eq(rounds.id, roundId) });
   if (round) await touchGameActivity(round.gameId);
@@ -17,11 +45,6 @@ export async function submitSpyGuess(roundId: number, playerId: number, guess: s
   await db.update(rounds)
     .set({ spyGuess: guess })
     .where(eq(rounds.id, roundId));
-
-  // Marcar veredito
-  await db.update(playerRoundState)
-    .set({ verdictActive: 1 })
-    .where(and(eq(playerRoundState.roundId, roundId), eq(playerRoundState.playerId, playerId)));
 
   logger.info(`Espião (player=${playerId}) chutou "${guess}" na rodada ${roundId}`);
 }
@@ -67,6 +90,69 @@ export async function checkRoundClose(roundId: number, api: Api): Promise<void> 
     return;
   }
 
+  // Auto-marcar veredito dos isolados (que não têm par para confirmar)
+  for (const isolated of unpairedStates) {
+    if (isolated.verdictActive === 1) continue;
+    await db.update(playerRoundState)
+      .set({ verdictActive: 1 })
+      .where(and(eq(playerRoundState.roundId, roundId), eq(playerRoundState.playerId, isolated.playerId)));
+  }
+
+  // Janela de graça para o espião chutar (ou alterar o chute) após os vereditos.
+  // Se o espião ainda não chutou e a graça ainda não foi iniciada, iniciar timer.
+  const currentRound = await db.query.rounds.findFirst({ where: eq(rounds.id, roundId) });
+  const spyHasGuessed = !!currentRound?.spyGuess;
+
+  if (!spyHasGuessed && !spyGraceTimers.has(roundId)) {
+    logger.info(`Rodada ${roundId}: iniciando grace de ${SPY_GRACE_SECONDS}s para chute do espião`);
+
+    const spyPlayer = activePlayers.find(p => p.id === round.spyPlayerId);
+    if (spyPlayer) {
+      try {
+        await api.sendMessage(spyPlayer.userId, messages.spyGraceNotify(SPY_GRACE_SECONDS), {
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🕵️ Chutar Local', callback_data: `spy_guess_btn:${roundId}` }],
+            ],
+          },
+        });
+      } catch (err) {
+        logger.error(`Erro notificando espião na graça: ${err}`);
+      }
+    }
+
+    const timer = setTimeout(() => {
+      spyGraceTimers.delete(roundId);
+      closeRoundNow(roundId, api).catch((err) =>
+        logger.error(`Erro ao fechar rodada ${roundId} após graça: ${err}`)
+      );
+    }, SPY_GRACE_MS);
+    spyGraceTimers.set(roundId, timer);
+    return;
+  }
+
+  // Se o espião já chutou (ou graça expirou), cancelar qualquer timer e fechar agora
+  cancelSpyGrace(roundId);
+  await closeRoundNow(roundId, api);
+}
+
+async function closeRoundNow(roundId: number, api: Api): Promise<void> {
+  const round = await db.query.rounds.findFirst({ where: eq(rounds.id, roundId) });
+  if (!round || round.status !== 'active') return;
+
+  const game = await db.query.games.findFirst({ where: eq(games.id, round.gameId) });
+  if (!game) return;
+
+  const activePlayers = await getPlayersInGame(round.gameId);
+  const allStates = await db.query.playerRoundState.findMany({
+    where: eq(playerRoundState.roundId, roundId),
+  });
+  const activePlayerIds = new Set(activePlayers.map(p => p.id));
+  const unpairedStates = allStates.filter(
+    s => activePlayerIds.has(s.playerId) && s.pairingStatus === 'unpaired'
+  );
+
   // Auto-marcar veredito do jogador isolado (não teve interação para votar)
   for (const isolated of unpairedStates) {
     await db.update(playerRoundState)
@@ -74,8 +160,7 @@ export async function checkRoundClose(roundId: number, api: Api): Promise<void> 
       .where(and(eq(playerRoundState.roundId, roundId), eq(playerRoundState.playerId, isolated.playerId)));
   }
 
-  // TODOS confirmaram — processar fechamento
-  logger.info(`Rodada ${roundId} - todos vereditos confirmados. Processando...`);
+  logger.info(`Rodada ${roundId} - processando fechamento final.`);
 
   // Verificar chute do espião
   const spyGuessApproved = await resolveSpyGuess(roundId, game, api);

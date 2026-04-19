@@ -1,10 +1,18 @@
-import { describe, it, expect } from 'vitest';
-import { submitSpyGuess, checkRoundClose, registerVote } from '../../src/engine/verdict';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { submitSpyGuess, checkRoundClose, registerVote, __resetSpyGraceTimers } from '../../src/engine/verdict';
 import { createFullRoundScenario } from '../helpers/factories';
 import { createMockApi } from '../helpers/mock-api';
 import { db } from '../../src/db/connection';
 import { playerRoundState, rounds } from '../../src/db/schema';
 import { eq, and } from 'drizzle-orm';
+
+beforeEach(() => {
+  __resetSpyGraceTimers();
+});
+
+afterEach(() => {
+  __resetSpyGraceTimers();
+});
 
 describe('submitSpyGuess', () => {
   it('salva o chute do espião na rodada', async () => {
@@ -15,14 +23,40 @@ describe('submitSpyGuess', () => {
     expect(updated!.spyGuess).toBe('Hospital');
   });
 
-  it('marca verdictActive do espião', async () => {
+  it('permite alterar o chute (Bug #2)', async () => {
+    const { round, spyPlayer } = await createFullRoundScenario({ playerCount: 4 });
+    await submitSpyGuess(round.id, spyPlayer.id, 'Hospital');
+    await submitSpyGuess(round.id, spyPlayer.id, 'Escola');
+
+    const updated = await db.query.rounds.findFirst({ where: eq(rounds.id, round.id) });
+    expect(updated!.spyGuess).toBe('Escola');
+  });
+
+  it('NÃO marca verdictActive automaticamente (Bug #2 — desacoplamento)', async () => {
     const { round, spyPlayer } = await createFullRoundScenario({ playerCount: 4 });
     await submitSpyGuess(round.id, spyPlayer.id, 'Escola');
 
     const state = await db.query.playerRoundState.findFirst({
       where: and(eq(playerRoundState.roundId, round.id), eq(playerRoundState.playerId, spyPlayer.id)),
     });
-    expect(state!.verdictActive).toBe(1);
+    // Chute e veredito são independentes: chutar não marca veredito
+    expect(state!.verdictActive).toBe(0);
+  });
+
+  it('chute funciona mesmo com espião sem par (Bug #2)', async () => {
+    // Cenário: 4 jogadores, spy isolado (unpaired)
+    const { round, spyPlayer } = await createFullRoundScenario({ playerCount: 4, spyIndex: 0 });
+
+    // Espião permanece unpaired (default) e chuta
+    await submitSpyGuess(round.id, spyPlayer.id, 'Hospital');
+
+    const updated = await db.query.rounds.findFirst({ where: eq(rounds.id, round.id) });
+    expect(updated!.spyGuess).toBe('Hospital');
+
+    const state = await db.query.playerRoundState.findFirst({
+      where: and(eq(playerRoundState.roundId, round.id), eq(playerRoundState.playerId, spyPlayer.id)),
+    });
+    expect(state!.pairingStatus).toBe('unpaired');
   });
 });
 
@@ -50,10 +84,10 @@ describe('registerVote', () => {
 });
 
 describe('checkRoundClose (Bug #3 regression)', () => {
-  it('fecha rodada quando todos pareados deram veredito e 1 está isolado', async () => {
+  it('fecha rodada quando todos pareados deram veredito, spy chutou e está isolado', async () => {
     // 4 jogadores: spy + 3 agentes (1 trio)
-    // O spy será isolado (unpaired)
-    const { round, players, spyPlayer, game } = await createFullRoundScenario({
+    // O spy será isolado (unpaired) mas com chute registrado
+    const { round, players, spyPlayer } = await createFullRoundScenario({
       playerCount: 4,
       spyIndex: 0,
     });
@@ -68,13 +102,69 @@ describe('checkRoundClose (Bug #3 regression)', () => {
         .where(and(eq(playerRoundState.roundId, round.id), eq(playerRoundState.playerId, agent.id)));
     }
 
-    // Spy continua unpaired (isolado) — sem veredito
+    // Spy registrou chute: grace é pulada, rodada fecha imediatamente
+    await submitSpyGuess(round.id, spyPlayer.id, 'Hospital');
+
     const api = createMockApi();
     await checkRoundClose(round.id, api);
 
-    // A rodada deve ter sido fechada
     const updatedRound = await db.query.rounds.findFirst({ where: eq(rounds.id, round.id) });
     expect(updatedRound!.status).toBe('closed');
+  });
+
+  it('NÃO fecha imediatamente se espião não chutou — inicia janela de graça (Bug #2)', async () => {
+    const { round, players, spyPlayer } = await createFullRoundScenario({
+      playerCount: 4,
+      spyIndex: 0,
+    });
+
+    const agents = players.filter(p => p.id !== spyPlayer.id);
+    const pairedWith = JSON.stringify(agents.map(a => a.id));
+    for (const agent of agents) {
+      await db.update(playerRoundState)
+        .set({ pairingStatus: 'paired', pairedWith, verdictActive: 1 })
+        .where(and(eq(playerRoundState.roundId, round.id), eq(playerRoundState.playerId, agent.id)));
+    }
+
+    // Espião SEM chute: grace inicia, rodada ainda não fecha
+    const api = createMockApi();
+    await checkRoundClose(round.id, api);
+
+    const updatedRound = await db.query.rounds.findFirst({ where: eq(rounds.id, round.id) });
+    expect(updatedRound!.status).toBe('active');
+
+    // Notificação de graça enviada ao espião
+    const spyNotified = (api.sendMessage as any).mock.calls.some(
+      (call: any[]) => call[0] === spyPlayer.userId && String(call[1]).includes('segundos para chutar')
+    );
+    expect(spyNotified).toBe(true);
+  });
+
+  it('fecha rodada ao receber chute do espião durante graça (Bug #2)', async () => {
+    const { round, players, spyPlayer } = await createFullRoundScenario({
+      playerCount: 4,
+      spyIndex: 0,
+    });
+
+    const agents = players.filter(p => p.id !== spyPlayer.id);
+    const pairedWith = JSON.stringify(agents.map(a => a.id));
+    for (const agent of agents) {
+      await db.update(playerRoundState)
+        .set({ pairingStatus: 'paired', pairedWith, verdictActive: 1 })
+        .where(and(eq(playerRoundState.roundId, round.id), eq(playerRoundState.playerId, agent.id)));
+    }
+
+    const api = createMockApi();
+    // Primeira chamada: dispara graça
+    await checkRoundClose(round.id, api);
+    expect((await db.query.rounds.findFirst({ where: eq(rounds.id, round.id) }))!.status).toBe('active');
+
+    // Espião chuta dentro da graça → nova verificação deve fechar
+    await submitSpyGuess(round.id, spyPlayer.id, 'Hospital');
+    await checkRoundClose(round.id, api);
+
+    const finalRound = await db.query.rounds.findFirst({ where: eq(rounds.id, round.id) });
+    expect(finalRound!.status).toBe('closed');
   });
 
   it('NÃO fecha se há pareamentos pendentes', async () => {

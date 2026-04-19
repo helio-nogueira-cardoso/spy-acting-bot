@@ -6,6 +6,9 @@ import { createGame, joinGame, leaveGame, validateGameStart, updateGameStatus } 
 import { getAnyActiveGameForChat, getPlayersInGame, getPlayerActiveGame, getPlayerInGame } from '../utils/validators';
 import { cleanupGameData } from '../engine/cleanup';
 import { config } from '../config';
+import { eq, and } from 'drizzle-orm';
+import { db } from '../db/connection';
+import { rounds, roundRoles, players as playersTable } from '../db/schema';
 
 export function registerCommands(bot: Bot<BotContext>): void {
   // /start — Boas-vindas no DM
@@ -250,6 +253,54 @@ export function registerCommands(bot: Bot<BotContext>): void {
       await cleanupGameData(game.id);
     } catch (error) {
       logger.error(`Erro no /endgame: ${error}`);
+      await ctx.reply(messages.errorGeneric);
+    }
+  });
+
+  // /chute — Permite ao espião chutar o local a qualquer momento (DM)
+  bot.command('chute', async (ctx) => {
+    try {
+      if (ctx.chat?.type !== 'private') {
+        await ctx.reply(messages.errorDmOnly);
+        return;
+      }
+
+      const userId = ctx.from!.id;
+      const game = await getPlayerActiveGame(userId);
+
+      if (!game || (game.status !== 'round_active' && game.status !== 'playing')) {
+        await ctx.reply(messages.spyRoundNotActive);
+        return;
+      }
+
+      const player = await db.query.players.findFirst({
+        where: and(eq(playersTable.gameId, game.id), eq(playersTable.userId, userId), eq(playersTable.isActive, 1)),
+      });
+      if (!player) {
+        await ctx.reply(messages.errorNotInGame);
+        return;
+      }
+
+      const activeRound = await db.query.rounds.findFirst({
+        where: and(eq(rounds.gameId, game.id), eq(rounds.status, 'active')),
+      });
+      if (!activeRound) {
+        await ctx.reply(messages.spyRoundNotActive);
+        return;
+      }
+
+      const role = await db.query.roundRoles.findFirst({
+        where: and(eq(roundRoles.roundId, activeRound.id), eq(roundRoles.playerId, player.id)),
+      });
+      if (role?.role !== 'spy') {
+        await ctx.reply(messages.spyNoGuessError);
+        return;
+      }
+
+      ctx.session.currentStep = `spy_guess:${activeRound.id}`;
+      await ctx.reply(messages.spyGuessPrompt, { parse_mode: 'Markdown' });
+    } catch (error) {
+      logger.error(`Erro no /chute: ${error}`);
       await ctx.reply(messages.errorGeneric);
     }
   });

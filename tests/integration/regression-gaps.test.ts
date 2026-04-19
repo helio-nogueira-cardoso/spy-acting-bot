@@ -17,7 +17,16 @@ import {
   getExpectedGroupSize,
   getAvailablePlayers,
 } from '../../src/engine/pairing';
-import { checkRoundClose } from '../../src/engine/verdict';
+import { checkRoundClose, submitSpyGuess, __resetSpyGraceTimers } from '../../src/engine/verdict';
+import { beforeEach, afterEach } from 'vitest';
+
+beforeEach(() => {
+  __resetSpyGraceTimers();
+});
+
+afterEach(() => {
+  __resetSpyGraceTimers();
+});
 import {
   createTestGame,
   createTestPlayer,
@@ -99,7 +108,9 @@ describe('Bug #3: rodada fecha com 3 jogadores (mínimo)', () => {
         .where(and(eq(playerRoundState.roundId, round.id), eq(playerRoundState.playerId, agent.id)));
     }
 
-    // Spy continua unpaired
+    // Spy continua unpaired mas com chute registrado (pula graça)
+    await submitSpyGuess(round.id, spyPlayer.id, 'Hospital');
+
     const api = createMockApi();
     await checkRoundClose(round.id, api);
 
@@ -131,6 +142,9 @@ describe('Bug #3: rodada fecha com 3 jogadores (mínimo)', () => {
         .set({ pairingStatus: 'paired', pairedWith: pair2, verdictActive: 1 })
         .where(and(eq(playerRoundState.roundId, round.id), eq(playerRoundState.playerId, a.id)));
     }
+
+    // Spy registra chute antes do close check (pula graça)
+    await submitSpyGuess(round.id, spyPlayer.id, 'Hospital');
 
     const api = createMockApi();
     await checkRoundClose(round.id, api);

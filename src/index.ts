@@ -32,6 +32,7 @@ async function main(): Promise<void> {
     { command: 'status', description: 'Ver estado do jogo' },
     { command: 'help', description: 'Regras e comandos' },
     { command: 'endgame', description: 'Encerrar jogo (criador)' },
+    { command: 'chute', description: 'Espião: chutar ou alterar o local (DM)' },
     { command: 'cancel', description: 'Cancelar operação em andamento' },
   ]);
 

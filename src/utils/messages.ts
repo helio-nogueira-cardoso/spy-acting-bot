@@ -163,12 +163,11 @@ _Fiquem atentos aos seus DMs!_
 _Hora de atuar... e desconfiar!_ 🕵️🎭
 `.trim(),
 
-  agentDm: (roundNumber: number, totalRounds: number, location: string, character: string, spyHint: string, partnerInfo: string) => `
+  agentDm: (roundNumber: number, totalRounds: number, location: string, character: string, partnerInfo: string) => `
 🎭 *RODADA ${roundNumber}/${totalRounds}*
 
 📍 *Local:* ${location}
 🎪 *Seu Papel:* ${character}
-💡 *Dica do Espião:* "${spyHint}"
 
 👥 *${partnerInfo}*
 
@@ -250,8 +249,22 @@ Status: ${statusEmoji[pairingStatus] || pairingStatus}
 
 Você é o espião. Digite o nome do local que você acha que é o correto:
 
-_Dica: tente lembrar das conversas e atuações dos agentes._
+_Dica: tente lembrar das conversas e atuações dos agentes. Você pode alterar o chute enviando outro palpite enquanto a rodada estiver aberta._
 `.trim(),
+
+  spyGuessRecorded: (guess: string) =>
+    `🕵️ Chute registrado: *"${guess}"*.\n\n_Você pode alterar enviando outro palpite, ou usando o botão "Chutar Local" a qualquer momento._`,
+
+  spyGraceNotify: (seconds: number) => `
+⏱️ *Últimos ${seconds} segundos para chutar!*
+
+Todos os agentes já confirmaram seus vereditos. Se você ainda não chutou um local, envie seu palpite agora (ou clique em "🕵️ Chutar Local").
+
+_Após o tempo, a rodada será encerrada automaticamente._
+`.trim(),
+
+  spyNoGuessError: '🚫 Você não é o espião desta rodada.',
+  spyRoundNotActive: '⏳ Nenhuma rodada ativa para chutar no momento.',
 
   verdictConfirmed: '✅ *Veredito registrado!*\n\n_Aguardando os outros agentes..._',
 
