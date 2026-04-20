@@ -14,6 +14,23 @@ import type { Api } from 'grammy';
 const SPY_GRACE_MS = 60_000;
 export const SPY_GRACE_SECONDS = SPY_GRACE_MS / 1000;
 
+// Janela para votação fair play
+const FAIR_PLAY_VOTING_MS = 60_000;
+export const FAIR_PLAY_VOTING_SECONDS = FAIR_PLAY_VOTING_MS / 1000;
+
+// Override do timeout — usado apenas em testes para acelerar o fluxo
+let fairPlayVotingTimeoutMs: number = FAIR_PLAY_VOTING_MS;
+
+/** Testes: permite sobrescrever o timeout da votação fair play (ms). */
+export function __setFairPlayVotingTimeoutMs(ms: number): void {
+  fairPlayVotingTimeoutMs = ms;
+}
+
+/** Testes: restaura o timeout padrão da votação fair play. */
+export function __resetFairPlayVotingTimeoutMs(): void {
+  fairPlayVotingTimeoutMs = FAIR_PLAY_VOTING_MS;
+}
+
 // Timers de grace ativos, chaveados por roundId
 const spyGraceTimers = new Map<number, ReturnType<typeof setTimeout>>();
 
@@ -32,10 +49,43 @@ export function cancelSpyGraceIfActive(roundId: number): void {
   cancelSpyGrace(roundId);
 }
 
+/** True se o espião ainda está na janela de graça (timer ativo). */
+export function isSpyGraceActive(roundId: number): boolean {
+  return spyGraceTimers.has(roundId);
+}
+
 /** Testes: limpa timers pendentes entre cenários. */
 export function __resetSpyGraceTimers(): void {
   for (const timer of spyGraceTimers.values()) clearTimeout(timer);
   spyGraceTimers.clear();
+}
+
+// ─── Sessões de votação fair play ─────────────────────────────────
+type VotingSession = {
+  timer: ReturnType<typeof setTimeout>;
+  eligibleVoters: Set<number>;
+  finalize: () => Promise<void>;
+  finalized: boolean;
+};
+
+const votingSessions = new Map<number, VotingSession>();
+
+/** Testes: limpa sessões de votação pendentes. */
+export function __resetVotingSessions(): void {
+  for (const session of votingSessions.values()) {
+    clearTimeout(session.timer);
+  }
+  votingSessions.clear();
+}
+
+// ─── Controle de re-entrância de closeRoundNow ────────────────────
+// Durante votação fair play, closeRoundNow pode levar até 60s.
+// Evita que checkRoundClose ou grace timer disparem uma segunda execução.
+const closingRounds = new Set<number>();
+
+/** Testes: limpa locks de fechamento entre cenários. */
+export function __resetClosingRounds(): void {
+  closingRounds.clear();
 }
 
 export async function submitSpyGuess(roundId: number, playerId: number, guess: string): Promise<void> {
@@ -99,7 +149,6 @@ export async function checkRoundClose(roundId: number, api: Api): Promise<void> 
   }
 
   // Janela de graça para o espião chutar (ou alterar o chute) após os vereditos.
-  // Se o espião ainda não chutou e a graça ainda não foi iniciada, iniciar timer.
   const currentRound = await db.query.rounds.findFirst({ where: eq(rounds.id, roundId) });
   const spyHasGuessed = !!currentRound?.spyGuess;
 
@@ -138,40 +187,50 @@ export async function checkRoundClose(roundId: number, api: Api): Promise<void> 
 }
 
 async function closeRoundNow(roundId: number, api: Api): Promise<void> {
-  const round = await db.query.rounds.findFirst({ where: eq(rounds.id, roundId) });
-  if (!round || round.status !== 'active') return;
+  // Lock para evitar re-entrância. resolveSpyGuess pode aguardar até 60s durante votação fair play.
+  if (closingRounds.has(roundId)) return;
+  closingRounds.add(roundId);
+  try {
+    const round = await db.query.rounds.findFirst({ where: eq(rounds.id, roundId) });
+    if (!round || round.status !== 'active') return;
 
-  const game = await db.query.games.findFirst({ where: eq(games.id, round.gameId) });
-  if (!game) return;
+    const game = await db.query.games.findFirst({ where: eq(games.id, round.gameId) });
+    if (!game) return;
 
-  const activePlayers = await getPlayersInGame(round.gameId);
-  const allStates = await db.query.playerRoundState.findMany({
-    where: eq(playerRoundState.roundId, roundId),
-  });
-  const activePlayerIds = new Set(activePlayers.map(p => p.id));
-  const unpairedStates = allStates.filter(
-    s => activePlayerIds.has(s.playerId) && s.pairingStatus === 'unpaired'
-  );
+    const activePlayers = await getPlayersInGame(round.gameId);
+    const allStates = await db.query.playerRoundState.findMany({
+      where: eq(playerRoundState.roundId, roundId),
+    });
+    const activePlayerIds = new Set(activePlayers.map(p => p.id));
+    const unpairedStates = allStates.filter(
+      s => activePlayerIds.has(s.playerId) && s.pairingStatus === 'unpaired'
+    );
 
-  // Auto-marcar veredito do jogador isolado (não teve interação para votar)
-  for (const isolated of unpairedStates) {
-    await db.update(playerRoundState)
-      .set({ verdictActive: 1 })
-      .where(and(eq(playerRoundState.roundId, roundId), eq(playerRoundState.playerId, isolated.playerId)));
+    // Auto-marcar veredito do jogador isolado (não teve interação para votar)
+    for (const isolated of unpairedStates) {
+      await db.update(playerRoundState)
+        .set({ verdictActive: 1 })
+        .where(and(eq(playerRoundState.roundId, roundId), eq(playerRoundState.playerId, isolated.playerId)));
+    }
+
+    logger.info(`Rodada ${roundId} - processando fechamento final.`);
+
+    // Verificar chute do espião
+    const spyGuessApproved = await resolveSpyGuess(roundId, game, api);
+
+    // Calcular pontuação
+    await calculateAndDisplayResults(roundId, game, spyGuessApproved, api);
+  } finally {
+    closingRounds.delete(roundId);
   }
-
-  logger.info(`Rodada ${roundId} - processando fechamento final.`);
-
-  // Verificar chute do espião
-  const spyGuessApproved = await resolveSpyGuess(roundId, game, api);
-
-  // Calcular pontuação
-  await calculateAndDisplayResults(roundId, game, spyGuessApproved, api);
 }
 
 async function resolveSpyGuess(roundId: number, game: any, api: Api): Promise<boolean> {
   const round = await db.query.rounds.findFirst({ where: eq(rounds.id, roundId) });
   if (!round) return false;
+
+  // Idempotência: se já foi resolvido anteriormente, retornar o valor persistido
+  if (round.spyGuessApproved !== null) return round.spyGuessApproved === 1;
 
   const spyGuess = round.spyGuess;
   if (!spyGuess) {
@@ -202,14 +261,11 @@ async function resolveSpyGuess(roundId: number, game: any, api: Api): Promise<bo
       },
     });
 
-    // Aguardar decisão (será resolvido via callback)
-    // Por enquanto, considerar como pendente — o cálculo será feito ao receber o callback
-    // Para simplificar, vamos aguardar com timeout
     return await waitForManualDecision(roundId, 180_000);
   }
 
   // Modo automático: votação fair play
-  logger.info(`Chute do espião difere: "${spyGuess}" ≠ "${round.locationName}". Iniciando votação.`);
+  logger.info(`Chute do espião difere: "${spyGuess}" ≠ "${round.locationName}". Iniciando votação fair play.`);
 
   await api.sendMessage(game.chatId, messages.fairPlayVote(spyGuess, round.locationName), {
     parse_mode: 'Markdown',
@@ -223,74 +279,110 @@ async function resolveSpyGuess(roundId: number, game: any, api: Api): Promise<bo
     },
   });
 
-  // Aguardar votação por 60 segundos
-  return await waitForVotingResult(roundId, 60_000);
+  // Elegíveis = todos os agentes ativos (espião não vota)
+  const activePlayers = await getPlayersInGame(round.gameId);
+  const eligibleVoters = new Set(
+    activePlayers.filter(p => p.id !== round.spyPlayerId).map(p => p.id)
+  );
+
+  return await startFairPlayVoting(roundId, eligibleVoters, fairPlayVotingTimeoutMs);
 }
 
-async function waitForVotingResult(roundId: number, timeoutMs: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    const checkInterval = setInterval(async () => {
-      // Verificar se já existe resultado
-      const round = await db.query.rounds.findFirst({ where: eq(rounds.id, roundId) });
-      if (round && round.spyGuessApproved !== null) {
-        clearInterval(checkInterval);
-        resolve(round.spyGuessApproved === 1);
-      }
-    }, 2000);
+/**
+ * Inicia uma sessão de votação fair play. Resolve quando:
+ *  - O timeout expira, OU
+ *  - Todos os elegíveis já votaram (fechamento antecipado via registerVote).
+ */
+function startFairPlayVoting(
+  roundId: number,
+  eligibleVoters: Set<number>,
+  timeoutMs: number
+): Promise<boolean> {
+  // Já existe sessão ativa para essa rodada (não deveria, mas defensivo):
+  // aguardar o resultado persistido via polling curto.
+  if (votingSessions.has(roundId)) {
+    return new Promise<boolean>((resolve) => {
+      const poll = async () => {
+        if (!votingSessions.has(roundId)) {
+          const r = await db.query.rounds.findFirst({ where: eq(rounds.id, roundId) });
+          resolve(r?.spyGuessApproved === 1);
+          return;
+        }
+        setTimeout(poll, 100);
+      };
+      poll();
+    });
+  }
 
-    setTimeout(async () => {
-      clearInterval(checkInterval);
+  return new Promise<boolean>((resolve) => {
+    const finalize = async (): Promise<void> => {
+      const session = votingSessions.get(roundId);
+      if (!session || session.finalized) return;
+      session.finalized = true;
+      clearTimeout(session.timer);
+      votingSessions.delete(roundId);
 
-      // Verificar se já foi decidido
-      const round = await db.query.rounds.findFirst({ where: eq(rounds.id, roundId) });
-      if (round && round.spyGuessApproved !== null) {
-        resolve(round.spyGuessApproved === 1);
-        return;
-      }
-
-      // Contar votos
       const votes = await db.query.spyGuessVotes.findMany({
         where: eq(spyGuessVotes.roundId, roundId),
       });
+      const eligibleVotes = votes.filter(v => session.eligibleVoters.has(v.voterPlayerId));
 
-      if (votes.length === 0) {
-        await db.update(rounds).set({ spyGuessApproved: 0 }).where(eq(rounds.id, roundId));
-        logger.info(`Votação rodada ${roundId}: nenhum voto. Chute invalidado.`);
-        resolve(false);
-        return;
+      let approved: boolean;
+      if (eligibleVotes.length === 0) {
+        approved = false;
+        logger.info(`Votação rodada ${roundId}: nenhum voto válido. Chute invalidado.`);
+      } else {
+        const yesVotes = eligibleVotes.filter(v => v.vote === 1).length;
+        const noVotes = eligibleVotes.filter(v => v.vote === 0).length;
+        approved = yesVotes >= noVotes && yesVotes > 0;
+        logger.info(
+          `Votação rodada ${roundId}: ${yesVotes} sim / ${noVotes} não → ${approved ? 'aprovado' : 'rejeitado'}`
+        );
       }
 
-      const yesVotes = votes.filter(v => v.vote === 1).length;
-      const noVotes = votes.filter(v => v.vote === 0).length;
-      const approved = yesVotes >= noVotes && yesVotes > 0;
-
       await db.update(rounds).set({ spyGuessApproved: approved ? 1 : 0 }).where(eq(rounds.id, roundId));
-      logger.info(`Votação rodada ${roundId}: ${yesVotes} sim / ${noVotes} não → ${approved ? 'aprovado' : 'rejeitado'}`);
       resolve(approved);
+    };
+
+    const timer = setTimeout(() => {
+      finalize().catch(err => logger.error(`Erro finalizando votação ${roundId}: ${err}`));
     }, timeoutMs);
+
+    votingSessions.set(roundId, {
+      timer,
+      eligibleVoters,
+      finalize,
+      finalized: false,
+    });
   });
 }
 
 async function waitForManualDecision(roundId: number, timeoutMs: number): Promise<boolean> {
   return new Promise((resolve) => {
+    let resolved = false;
+    const done = (value: boolean) => {
+      if (resolved) return;
+      resolved = true;
+      clearInterval(checkInterval);
+      clearTimeout(timeoutHandle);
+      resolve(value);
+    };
+
     const checkInterval = setInterval(async () => {
       const round = await db.query.rounds.findFirst({ where: eq(rounds.id, roundId) });
       if (round && round.spyGuessApproved !== null) {
-        clearInterval(checkInterval);
-        resolve(round.spyGuessApproved === 1);
+        done(round.spyGuessApproved === 1);
       }
     }, 2000);
 
-    setTimeout(async () => {
-      clearInterval(checkInterval);
+    const timeoutHandle = setTimeout(async () => {
       const round = await db.query.rounds.findFirst({ where: eq(rounds.id, roundId) });
       if (round && round.spyGuessApproved !== null) {
-        resolve(round.spyGuessApproved === 1);
+        done(round.spyGuessApproved === 1);
         return;
       }
-      // Timeout: invalidar
       await db.update(rounds).set({ spyGuessApproved: 0 }).where(eq(rounds.id, roundId));
-      resolve(false);
+      done(false);
     }, timeoutMs);
   });
 }
@@ -330,6 +422,21 @@ export async function registerVote(
   });
 
   logger.info(`Voto registrado: jogador ${playerId}, voto=${vote}, rodada ${roundId}`);
+
+  // Fechamento antecipado: se todos os elegíveis já votaram, encerra a sessão agora.
+  const session = votingSessions.get(roundId);
+  if (session && !session.finalized) {
+    const allVotes = await db.query.spyGuessVotes.findMany({
+      where: eq(spyGuessVotes.roundId, roundId),
+    });
+    const voterIds = new Set(allVotes.map(v => v.voterPlayerId));
+    const allEligibleVoted = Array.from(session.eligibleVoters).every(pid => voterIds.has(pid));
+    if (allEligibleVoted) {
+      logger.info(`Votação rodada ${roundId}: todos os elegíveis votaram — fechando antecipadamente.`);
+      await session.finalize();
+    }
+  }
+
   return { success: true };
 }
 
