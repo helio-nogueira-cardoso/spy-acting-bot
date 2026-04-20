@@ -105,18 +105,24 @@ export function registerTextHandlers(bot: Bot<BotContext>): void {
           return;
         }
 
-        const { submitSpyGuess, checkRoundClose } = await import('../engine/verdict');
+        const { submitSpyGuess, checkRoundClose, isSpyGraceActive } = await import('../engine/verdict');
+        // Se estamos na janela de graça, este é o chute final — rodada fecha em seguida.
+        const duringGrace = isSpyGraceActive(roundId);
         await submitSpyGuess(roundId, player.id, guess);
 
         ctx.session.currentStep = undefined;
-        await ctx.reply(messages.spyGuessRecorded(guess), {
-          parse_mode: 'Markdown',
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: '🕵️ Alterar Chute', callback_data: `spy_guess_btn:${roundId}` }],
-            ],
-          },
-        });
+        if (duringGrace) {
+          await ctx.reply(messages.spyGuessRecordedFinal(guess), { parse_mode: 'Markdown' });
+        } else {
+          await ctx.reply(messages.spyGuessRecorded(guess), {
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '🕵️ Alterar Chute', callback_data: `spy_guess_btn:${roundId}` }],
+              ],
+            },
+          });
+        }
 
         await checkRoundClose(roundId, ctx.api);
         return;

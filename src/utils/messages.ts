@@ -255,6 +255,9 @@ _Dica: tente lembrar das conversas e atuações dos agentes. Você pode alterar 
   spyGuessRecorded: (guess: string) =>
     `🕵️ Chute registrado: *"${guess}"*.\n\n_Você pode alterar enviando outro palpite, ou usando o botão "Chutar Local" a qualquer momento._`,
 
+  spyGuessRecordedFinal: (guess: string) =>
+    `🕵️ Chute registrado: *"${guess}"*.\n\n_Chute final — a rodada está encerrando._`,
+
   spyGraceNotify: (seconds: number) => `
 ⏱️ *Últimos ${seconds} segundos para chutar!*
 
